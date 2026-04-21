@@ -113,7 +113,7 @@ X-Flow-State: FS_def456...
 Content-Type: application/json
 
 {
-  "password": "VipAuth2025%"
+  "password": "your_password"
 }
 ```
 
