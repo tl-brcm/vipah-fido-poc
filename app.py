@@ -45,7 +45,10 @@ import os
 import time
 
 import requests
+import urllib3
 from dotenv import load_dotenv
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from flask import Flask, jsonify, request, send_from_directory
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -106,7 +109,7 @@ def _log_payload(label: str, data: dict):
 def _vipah_post(url: str, payload: dict, headers: dict) -> requests.Response:
     """POST to VIP Auth Hub with consistent payload logging."""
     _log_payload(f"→ POST {url}", payload)
-    resp = requests.post(url, json=payload, headers=headers)
+    resp = requests.post(url, json=payload, headers=headers, verify=False)
     _log_payload(f"← {resp.status_code} {url}", resp.json() if resp.content else {})
     return resp
 
@@ -138,6 +141,7 @@ def get_access_token() -> str:
         f"{VIPAH_BASE_URL}/oauth2/v1/token",
         data={"grant_type": "client_credentials", "scope": "urn:iam:myscopes"},
         auth=(CLIENT_ID, CLIENT_SECRET),
+        verify=False,
     )
     resp.raise_for_status()
     logger.debug("Access token acquired (expires_in=%s)", resp.json().get("expires_in"))
@@ -209,6 +213,7 @@ def delete_fido_credentials(token: str):
         requests.delete(
             f"{VIPAH_BASE_URL}/admin/v1/Creds/{TEST_USER_ID}/{cred['credId']}",
             headers={"Authorization": f"Bearer {token}", "user-id": "SYSTEM"},
+            verify=False,
         )
         logger.info("Deleted FIDO credential %s", cred["credId"])
 
@@ -348,6 +353,7 @@ def register_finish():
                 "Authorization": f"Bearer {session['token']}",
                 "X-Flow-State":  session["flowState"],
             },
+            verify=False,
         )
         result = resp.json()
         _log_payload(f"← {resp.status_code} FIDORegChallengeVerifier", result)
@@ -470,7 +476,7 @@ def authenticate_finish():
         resp   = requests.post(verifier, json=credential, headers={
             "Authorization": f"Bearer {session['token']}",
             "X-Flow-State":  session["flowState"],
-        })
+        }, verify=False)
         result = resp.json()
         _log_payload(f"← {resp.status_code} {verifier.split('/')[-1]}", result)
 
@@ -496,6 +502,7 @@ def get_credentials():
         resp  = requests.get(
             f"{VIPAH_BASE_URL}/admin/v1/Creds/{TEST_USER_ID}",
             headers={"Authorization": f"Bearer {token}", "user-id": "SYSTEM"},
+            verify=False,
         )
         all_creds  = resp.json()
         fido_creds = [c for c in all_creds if c.get("credType") == "fido"]
@@ -513,6 +520,7 @@ def delete_fido_endpoint():
         resp  = requests.get(
             f"{VIPAH_BASE_URL}/admin/v1/Creds/{TEST_USER_ID}",
             headers={"Authorization": f"Bearer {token}", "user-id": "SYSTEM"},
+            verify=False,
         )
         fido_creds = [c for c in resp.json() if c.get("credType") == "fido"]
 
@@ -524,6 +532,7 @@ def delete_fido_endpoint():
             del_resp = requests.delete(
                 f"{VIPAH_BASE_URL}/admin/v1/Creds/{TEST_USER_ID}/{cred['credId']}",
                 headers={"Authorization": f"Bearer {token}", "user-id": "SYSTEM"},
+                verify=False,
             )
             deleted.append({"credId": cred["credId"], "status": del_resp.status_code})
             logger.info("Deleted FIDO credential %s (HTTP %s)", cred["credId"], del_resp.status_code)
