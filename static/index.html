@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VIP Auth Hub – FIDO POC</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f2f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .container { background: white; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.1); padding: 40px; width: 580px; max-width: 95vw; }
+    h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 6px; }
+    .subtitle { color: #666; font-size: 14px; margin-bottom: 28px; }
+    .section { margin-bottom: 24px; }
+    .section h2 { font-size: 15px; font-weight: 600; color: #333; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #f0f2f5; }
+    .section p { font-size: 13px; color: #555; margin-bottom: 12px; line-height: 1.5; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary   { background: #4f46e5; color: white; }
+    .btn-primary:hover:not(:disabled)   { background: #4338ca; }
+    .btn-success   { background: #059669; color: white; }
+    .btn-success:hover:not(:disabled)   { background: #047857; }
+    .btn-danger    { background: #dc2626; color: white; }
+    .btn-danger:hover:not(:disabled)    { background: #b91c1c; }
+    .btn-secondary { background: #6b7280; color: white; }
+    .btn-secondary:hover:not(:disabled) { background: #4b5563; }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .log { background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 12px; min-height: 140px; max-height: 340px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    .log .success { color: #4ade80; }
+    .log .error   { color: #f87171; }
+    .log .info    { color: #60a5fa; }
+    .log .dim     { color: #94a3b8; }
+    .status-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; }
+    .status-bar.none         { background: #f1f5f9; color: #64748b; }
+    .status-bar.registered   { background: #d1fae5; color: #065f46; }
+    .status-bar.unregistered { background: #fee2e2; color: #991b1b; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot.green { background: #10b981; }
+    .dot.red   { background: #ef4444; }
+    .dot.gray  { background: #94a3b8; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>VIP Auth Hub – FIDO2/WebAuthn POC</h1>
+  <p class="subtitle">FIDO registration and authentication against <strong>ssp-215.demo-broadcom.com</strong></p>
+
+  <!-- ── Credential Status ───────────────────────────────────── -->
+  <div class="section">
+    <h2>Credential Status</h2>
+    <div class="status-bar none" id="statusBar">
+      <span class="dot gray"></span>
+      <span id="statusText">Loading...</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-secondary" onclick="checkCredentials()">Refresh Status</button>
+      <button class="btn btn-danger" id="btnDeleteFido" onclick="deleteFido()" disabled>Delete FIDO Credential</button>
+    </div>
+  </div>
+
+  <!-- ── FIDO Registration ────────────────────────────────────── -->
+  <div class="section">
+    <h2>FIDO Registration</h2>
+    <p>
+      Registers a new FIDO2/WebAuthn credential for the configured test user.
+      The user must <strong>not</strong> already have a FIDO credential — delete
+      any existing one above first.
+    </p>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btnRegister" onclick="startRegistration()">Register FIDO Key</button>
+    </div>
+  </div>
+
+  <!-- ── FIDO Authentication ─────────────────────────────────── -->
+  <div class="section">
+    <h2>FIDO Authentication</h2>
+    <p>
+      Proves FIDO key possession — server responds with <strong>AUTH_ALLOWED</strong>.<br>
+      Requires a previously registered credential. The server selects the
+      appropriate challenge path automatically (direct FIDO auth or inline
+      re-registration fallback).
+    </p>
+    <div class="btn-row">
+      <button class="btn btn-success" id="btnAuthenticate" onclick="startAuthentication()">Authenticate with FIDO</button>
+    </div>
+  </div>
+
+  <!-- ── Activity Log ─────────────────────────────────────────── -->
+  <div class="section">
+    <h2>Activity Log</h2>
+    <div class="log" id="log">Waiting for action...<br></div>
+  </div>
+</div>
+
+<script>
+  // ── Base64url helpers ──────────────────────────────────────────────────────
+
+  /** Decode a base64url string to a Uint8Array (needed for WebAuthn binary fields). */
+  function b64uToBuffer(b64u) {
+    const b64 = b64u.replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(b64);
+    return Uint8Array.from(raw, c => c.charCodeAt(0));
+  }
+
+  /** Encode an ArrayBuffer to base64url (used when sending the credential back to the server). */
+  function bufferToB64u(buf) {
+    const bytes = new Uint8Array(buf);
+    let str = '';
+    bytes.forEach(b => str += String.fromCharCode(b));
+    return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+  }
+
+  // ── Activity log ───────────────────────────────────────────────────────────
+
+  const logEl = document.getElementById('log');
+
+  function log(msg, cls = '') {
+    const span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = msg + '\n';
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function clearLog() { logEl.innerHTML = ''; }
+
+  // ── Credential status ──────────────────────────────────────────────────────
+
+  async function checkCredentials() {
+    const bar    = document.getElementById('statusBar');
+    const txt    = document.getElementById('statusText');
+    const delBtn = document.getElementById('btnDeleteFido');
+
+    txt.textContent = 'Checking...';
+    try {
+      const resp = await fetch('/api/user/credentials');
+      const data = await resp.json();
+      const fidoCreds = data.credentials || [];
+
+      if (fidoCreds.length > 0) {
+        bar.className = 'status-bar registered';
+        bar.querySelector('.dot').className = 'dot green';
+        txt.textContent = 'FIDO credential registered' +
+          (fidoCreds[0].domain ? ` (domain: ${fidoCreds[0].domain})` : '') +
+          (fidoCreds[0].createdDatetime ? `, created: ${fidoCreds[0].createdDatetime}` : '');
+        delBtn.disabled = false;
+      } else {
+        bar.className = 'status-bar unregistered';
+        bar.querySelector('.dot').className = 'dot red';
+        txt.textContent = 'No FIDO credential registered — ready for registration';
+        delBtn.disabled = true;
+      }
+    } catch (e) {
+      bar.className = 'status-bar none';
+      bar.querySelector('.dot').className = 'dot gray';
+      txt.textContent = 'Error checking credentials: ' + e.message;
+    }
+  }
+
+  // ── Delete credential ──────────────────────────────────────────────────────
+
+  async function deleteFido() {
+    if (!confirm('Delete the existing FIDO credential?')) return;
+    clearLog();
+    log('Deleting FIDO credential...', 'info');
+    try {
+      const resp = await fetch('/api/user/delete-fido', { method: 'DELETE' });
+      const data = await resp.json();
+      log('Deleted: ' + JSON.stringify(data, null, 2), 'success');
+      await checkCredentials();
+    } catch (e) {
+      log('Error: ' + e.message, 'error');
+    }
+  }
+
+  // ── FIDO Registration ──────────────────────────────────────────────────────
+
+  async function startRegistration() {
+    clearLog();
+    log('=== FIDO Registration ===', 'info');
+    log('Step 1: Requesting challenge from server...', 'dim');
+
+    const btn = document.getElementById('btnRegister');
+    btn.disabled = true;
+
+    try {
+      // Server runs the VIP Auth Hub flow and returns PublicKeyCredentialCreationOptions
+      const startResp = await fetch('/api/fido/register/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const startData = await startResp.json();
+
+      if (startData.error) {
+        log('Server error: ' + JSON.stringify(startData, null, 2), 'error');
+        return;
+      }
+
+      const { sessionId, publicKey } = startData;
+      log(`Challenge received (rpId: ${publicKey.rp?.id})`, 'success');
+      log('Step 2: Browser biometric prompt (navigator.credentials.create)...', 'dim');
+
+      // Convert base64url fields to ArrayBuffers as required by the WebAuthn API
+      const createOptions = {
+        challenge:    b64uToBuffer(publicKey.challenge),
+        rp:           publicKey.rp,
+        user: {
+          id:          b64uToBuffer(publicKey.user.id),
+          name:        publicKey.user.name,
+          displayName: publicKey.user.displayName,
+        },
+        pubKeyCredParams:       publicKey.pubKeyCredParams,
+        timeout:                publicKey.timeout || 120000,
+        attestation:            publicKey.attestation || 'none',
+        authenticatorSelection: publicKey.authenticatorSelection || {},
+        excludeCredentials: (publicKey.excludeCredentials || []).map(c => ({
+          type:       c.type,
+          id:         b64uToBuffer(c.id),
+          transports: c.transports,
+        })),
+      };
+
+      const credential = await navigator.credentials.create({ publicKey: createOptions });
+      log('Credential created: ' + credential.id, 'success');
+      log('Step 3: Verifying with VIP Auth Hub (FIDORegChallengeVerifier)...', 'dim');
+
+      // Send the attestation back to the server for VIP Auth Hub to verify
+      const credPayload = {
+        id:    credential.id,
+        rawId: bufferToB64u(credential.rawId),
+        type:  credential.type,
+        response: {
+          attestationObject: bufferToB64u(credential.response.attestationObject),
+          clientDataJSON:    bufferToB64u(credential.response.clientDataJSON),
+          getTransports:     {}, // VIP Auth Hub requires an object, not the array from the browser API
+        },
+        getClientExtensionResults: credential.getClientExtensionResults(),
+      };
+
+      const finishResp = await fetch('/api/fido/register/finish', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ sessionId, credential: credPayload }),
+      });
+      const finishData = await finishResp.json();
+
+      if (finishData.success) {
+        log('\n✅ Registration successful! (nextaction: ' + finishData.nextaction + ')', 'success');
+        log('Full response:\n' + JSON.stringify(finishData.data, null, 2), 'dim');
+        await checkCredentials();
+      } else {
+        log('\n❌ Registration failed:', 'error');
+        log(JSON.stringify(finishData, null, 2), 'error');
+      }
+
+    } catch (e) {
+      if (e.name === 'NotAllowedError') {
+        log('WebAuthn cancelled or timed out (user dismissed the prompt)', 'error');
+      } else if (e.name === 'InvalidStateError') {
+        log('A credential for this RP is already registered on this device.\nDelete it above, then try again.', 'error');
+      } else {
+        log('Error: ' + e.name + ' – ' + e.message, 'error');
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ── FIDO Authentication ────────────────────────────────────────────────────
+
+  async function startAuthentication() {
+    clearLog();
+    log('=== FIDO Authentication ===', 'info');
+    log('Step 1: Requesting challenge from server...', 'dim');
+
+    const btn = document.getElementById('btnAuthenticate');
+    btn.disabled = true;
+
+    try {
+      // Server determines the auth path and returns the appropriate challenge
+      const startResp = await fetch('/api/fido/authenticate/start', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const startData = await startResp.json();
+
+      if (startData.error) {
+        log('Server error: ' + JSON.stringify(startData, null, 2), 'error');
+        return;
+      }
+
+      const { sessionId, publicKey, mode } = startData;
+      log(`Challenge received (mode: ${mode})`, 'success');
+
+      let credential;
+
+      if (mode === 'auth') {
+        // Path A – direct FIDO auth: credential stored under server's RP domain
+        log(`rpId: ${publicKey.rpId}`, 'dim');
+        log('Step 2: Browser assertion prompt (navigator.credentials.get)...', 'dim');
+
+        credential = await navigator.credentials.get({
+          publicKey: {
+            challenge:        b64uToBuffer(publicKey.challenge),
+            timeout:          publicKey.timeout || 120000,
+            rpId:             publicKey.rpId,
+            userVerification: publicKey.userVerification || 'required',
+            allowCredentials: (publicKey.allowCredentials || []).map(c => ({
+              type:       c.type,
+              id:         b64uToBuffer(c.id),
+              transports: c.transports,
+            })),
+          },
+        });
+
+      } else {
+        // Path B – inline re-registration: server cleared old credential; fresh biometric via create()
+        log(`rpId: ${publicKey.rp?.id} (inline re-registration path)`, 'dim');
+        log('Step 2: Browser biometric prompt (navigator.credentials.create)...', 'dim');
+
+        credential = await navigator.credentials.create({
+          publicKey: {
+            challenge:    b64uToBuffer(publicKey.challenge),
+            rp:           publicKey.rp,
+            user: {
+              id:          b64uToBuffer(publicKey.user.id),
+              name:        publicKey.user.name,
+              displayName: publicKey.user.displayName,
+            },
+            pubKeyCredParams:       publicKey.pubKeyCredParams,
+            timeout:                publicKey.timeout || 120000,
+            attestation:            publicKey.attestation || 'none',
+            authenticatorSelection: publicKey.authenticatorSelection || {},
+            excludeCredentials: (publicKey.excludeCredentials || []).map(c => ({
+              type: c.type,
+              id:   b64uToBuffer(c.id),
+            })),
+          },
+        });
+      }
+
+      log('Credential: ' + credential.id, 'success');
+      log(`Step 3: Verifying with VIP Auth Hub (${mode === 'auth' ? 'FIDOAuthChallengeVerifier' : 'FIDORegChallengeVerifier'})...`, 'dim');
+
+      // Build the payload depending on whether this is an assertion or attestation
+      let credPayload;
+      if (mode === 'auth') {
+        credPayload = {
+          id:    credential.id,
+          rawId: bufferToB64u(credential.rawId),
+          type:  credential.type,
+          response: {
+            authenticatorData: bufferToB64u(credential.response.authenticatorData),
+            clientDataJSON:    bufferToB64u(credential.response.clientDataJSON),
+            signature:         bufferToB64u(credential.response.signature),
+            userHandle:        credential.response.userHandle ? bufferToB64u(credential.response.userHandle) : '',
+          },
+          getClientExtensionResults: credential.getClientExtensionResults(),
+        };
+      } else {
+        credPayload = {
+          id:    credential.id,
+          rawId: bufferToB64u(credential.rawId),
+          type:  credential.type,
+          response: {
+            attestationObject: bufferToB64u(credential.response.attestationObject),
+            clientDataJSON:    bufferToB64u(credential.response.clientDataJSON),
+            getTransports:     {},
+          },
+          getClientExtensionResults: credential.getClientExtensionResults(),
+        };
+      }
+
+      const finishResp = await fetch('/api/fido/authenticate/finish', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ sessionId, credential: credPayload, mode }),
+      });
+      const finishData = await finishResp.json();
+
+      if (finishData.success) {
+        log('\n✅ Authentication successful! (mode: ' + mode + ', nextaction: ' + finishData.nextaction + ')', 'success');
+        log('Full response:\n' + JSON.stringify(finishData.data, null, 2), 'dim');
+      } else {
+        log('\n❌ Authentication failed:', 'error');
+        log(JSON.stringify(finishData, null, 2), 'error');
+      }
+
+    } catch (e) {
+      if (e.name === 'NotAllowedError') {
+        log('WebAuthn cancelled or timed out (user dismissed the prompt)', 'error');
+      } else {
+        log('Error: ' + e.name + ' – ' + e.message, 'error');
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Load credential status on page load
+  checkCredentials();
+</script>
+</body>
+</html>

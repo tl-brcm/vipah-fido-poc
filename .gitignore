@@ -1,0 +1,26 @@
+# Environment – contains real credentials, never commit
+.env
+
+# Secrets and local config files
+client.txt
+*.postman_collection.json
+
+# TLS certificates
+certs/
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Claude Code memory
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
